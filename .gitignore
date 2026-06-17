@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Google Drive service account key — never commit this
+keys/
+*.json.key
+service-account*.json
+*-service-account*.json
+solution-portal-creator-*.json

@@ -3,12 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
-import { Solution, Collateral, UserLog, CurrentProject, UpcomingProject, SubdomainPortal } from "./src/types";
+import OpenAI from "openai";
+import { Solution, Collateral, UserLog, CurrentProject, UpcomingProject, SubdomainPortal } from "../shared/types";
+import {
+  syncDataStoreToDrive,
+  appendLogToDrive,
+  uploadCollateralMetadataToDrive,
+  uploadSolutionMetadataToDrive,
+  driveHealthCheck,
+} from "./drive";
 
 // Setup storage
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -22,25 +30,17 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-// Lazy loaded Gemini Client
-let googleAIClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI | null {
-  if (!googleAIClient) {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key) {
-      console.warn("GEMINI_API_KEY environment variable is defined but empty or missing. AI calls will run with local fallback simulation.");
-      return null;
-    }
-    googleAIClient = new GoogleGenAI({
-      apiKey: key,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
+// Lazy loaded OpenAI Client
+let openAIClient: OpenAI | null = null;
+function getOpenAIClient(): OpenAI | null {
+  if (openAIClient) return openAIClient;
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) {
+    console.warn("[AI] OPENAI_API_KEY not set. AI calls will use offline fallback simulation.");
+    return null;
   }
-  return googleAIClient;
+  openAIClient = new OpenAI({ apiKey: key });
+  return openAIClient;
 }
 
 // Dynamic state helpers
@@ -286,6 +286,11 @@ function readDatabase(): DatabaseSchema {
 function writeDatabase(db: DatabaseSchema) {
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), "utf-8");
+    console.debug("[DB] Local data-store.json written. Triggering Drive sync...");
+    // Fire-and-forget Drive sync — does not block the response
+    syncDataStoreToDrive(DATA_FILE).catch((err) =>
+      console.error("[Drive] Background sync error:", err)
+    );
   } catch (error) {
     console.error("Error writing database:", error);
   }
@@ -293,11 +298,17 @@ function writeDatabase(db: DatabaseSchema) {
 
 // Start Express server
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || "4567", 10);
 
 // Body parser
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Google Drive health-check endpoint
+app.get("/api/drive/health", async (req, res) => {
+  const status = await driveHealthCheck();
+  res.json(status);
+});
 
 // Mock file downloads
 app.get("/api/download/:filename", (req, res) => {
@@ -305,7 +316,7 @@ app.get("/api/download/:filename", (req, res) => {
   // Create a clean mock text file representing the source document requested
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   res.setHeader("Content-Type", "text/plain");
-  res.send(`--- MOBIUS SERVICES COMPLIARY ARCHIVE DOWNLOAD ---\nFile: ${filename}\nStatus: Audited & Digitized\nTimestamp: ${new Date().toISOString()}\n\nThis mock document serves as the background reference materials utilized by Gemini to construct the tailored Case Study summary format.\nAll underlying calculations, logs, and schemas correspond to customer outcomes.\n`);
+  res.send(`--- MOBIUS SERVICES COMPLIARY ARCHIVE DOWNLOAD ---\nFile: ${filename}\nStatus: Audited & Digitized\nTimestamp: ${new Date().toISOString()}\n\nThis mock document serves as the background reference materials utilized by OpenAI to construct the tailored Case Study summary format.\nAll underlying calculations, logs, and schemas correspond to customer outcomes.\n`);
 });
 
 // GET database
@@ -359,6 +370,11 @@ app.post("/api/email-login", (req, res) => {
   db.userLogs.unshift(newLog);
   writeDatabase(db);
 
+  // Async Drive log append
+  appendLogToDrive(newLog).catch((err) =>
+    console.error("[Drive] Login log append failed:", err)
+  );
+
   res.json({ success: true, email: normalized });
 });
 
@@ -377,6 +393,12 @@ app.post("/api/log", (req, res) => {
   
   db.userLogs.unshift(newLog);
   writeDatabase(db);
+
+  // Async Drive log append — fire-and-forget
+  appendLogToDrive(newLog).catch((err) =>
+    console.error("[Drive] Log append failed:", err)
+  );
+
   res.json({ success: true });
 });
 
@@ -399,6 +421,15 @@ app.post("/api/admin/solutions", (req, res) => {
       details: `Solution "${newSol.title}" onboarded successfully.`,
       date: new Date().toISOString()
     });
+    // Sync solution metadata to Drive
+    uploadSolutionMetadataToDrive({
+      id: newSol.id,
+      title: newSol.title,
+      url: newSol.url,
+      tags: newSol.tags,
+      customerName: newSol.customerName,
+      createdAt: newSol.createdAt,
+    }).catch((err) => console.error("[Drive] Solution upload failed:", err));
   } else if (action === "update") {
     db.solutions = db.solutions.map(s => s.id === solution.id ? { ...s, ...solution } : s);
     db.userLogs.unshift({
@@ -442,6 +473,14 @@ app.post("/api/admin/collaterals", (req, res) => {
       details: `Collateral study "${newCol.title}" created.`,
       date: new Date().toISOString()
     });
+    // Upload collateral metadata to Drive
+    uploadCollateralMetadataToDrive({
+      id: newCol.id,
+      title: newCol.title,
+      customerName: newCol.customerName,
+      uploadedFiles: newCol.uploadedFiles || [],
+      createdAt: newCol.createdAt,
+    }).catch((err) => console.error("[Drive] Collateral upload failed:", err));
   } else if (action === "update") {
     db.collaterals = db.collaterals.map(c => c.id === collateral.id ? { ...c, ...collateral } : c);
     db.userLogs.unshift({
@@ -556,7 +595,7 @@ app.post("/api/admin/projects/upcoming", (req, res) => {
   res.json({ success: true, database: db });
 });
 
-// AI PROJECT GENERATOR via Gemini API
+// AI PROJECT GENERATOR via OpenAI
 app.post("/api/admin/generate-project", async (req, res) => {
   const { name, customerName, templateType } = req.body;
   
@@ -598,13 +637,13 @@ app.post("/api/admin/generate-project", async (req, res) => {
 
   try {
     let responseText = "";
-    const client = getGeminiClient();
+    const client = getOpenAIClient();
     if (client) {
-      const response = await client.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: systemPrompt,
+      const response = await client.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: systemPrompt }],
       });
-      responseText = response.text || "";
+      responseText = response.choices[0]?.message?.content || "";
     } else {
       // Offline Simulation
       if (templateType === "current") {
@@ -646,11 +685,11 @@ app.post("/api/admin/generate-project", async (req, res) => {
     res.json(resultObj);
   } catch (error: any) {
     console.error("AI Project Generation Error:", error);
-    res.status(500).json({ error: "Failed to generate project mock parameters with Gemini. " + error.message });
+    res.status(500).json({ error: "Failed to generate project parameters with OpenAI. " + error.message });
   }
 });
 
-// GET dynamic AI layout generation with Gemini API
+// GET dynamic AI layout generation with OpenAI
 app.post("/api/admin/generate-collateral", async (req, res) => {
   const { title, prompt, uploadedFiles } = req.body;
   const db = readDatabase();
@@ -678,13 +717,13 @@ ${referenceDocs}`;
 
   try {
     let responseText = "";
-    const client = getGeminiClient();
+    const client = getOpenAIClient();
     if (client) {
-      const response = await client.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: `${systemPrompt}\n\nUser Prompts/Modifications:\n${prompt}`,
+      const response = await client.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: `${systemPrompt}\n\nUser Prompts/Modifications:\n${prompt}` }],
       });
-      responseText = response.text || "";
+      responseText = response.choices[0]?.message?.content || "";
     } else {
       // Simulate gorgeous Markdown responses so the program operates perfectly in dev
       responseText = `# ${title || "Client Logistics Intelligence Study"}
@@ -712,8 +751,8 @@ A major multi-national client managing regional warehouse facilities across APAC
 
     res.json({ generatedContent: responseText });
   } catch (error: any) {
-    console.error("Gemini Generation Error:", error);
-    res.status(500).json({ error: "Failed to generate study using Gemini API. " + error.message });
+    console.error("OpenAI Generation Error:", error);
+    res.status(500).json({ error: "Failed to generate study using OpenAI. " + error.message });
   }
 });
 
@@ -730,13 +769,13 @@ The style must be direct, sophisticated, and professional. Do not use exclamatio
 
   try {
     let heroOutput = "";
-    const client = getGeminiClient();
+    const client = getOpenAIClient();
     if (client) {
-      const response = await client.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: `${systemPrompt}\n\nCorporate focus instructions:\n${prompt}`,
+      const response = await client.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: `${systemPrompt}\n\nCorporate focus instructions:\n${prompt}` }],
       });
-      heroOutput = response.text || "";
+      heroOutput = response.choices[0]?.message?.content || "";
     } else {
       heroOutput = `## Custom Enterprise Workflows & Predictive Business Modules
 We build production technical portals and AI pipelines that resolve hard enterprise logistics, retail sales spikes, and system routing demands. Explore real portals or read audited customer execution case studies.`;
@@ -843,15 +882,15 @@ app.post("/api/admin/subdomains", (req, res) => {
 });
 
 async function startServer() {
-  // Vite integration
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
+      configFile: path.resolve(__dirname, "../frontend/vite.config.ts"),
+      root: path.resolve(__dirname, "../frontend"),
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    // Serve client build in production
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
@@ -860,7 +899,12 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[Mobius Portal Server] Operating securely at: http://localhost:${PORT}`);
+    console.log(`\n========================================`);
+    console.log(`  SPC — Solutions Portal & Collaterals`);
+    console.log(`  Running on: http://localhost:${PORT}`);
+    console.log(`  Mode: ${process.env.NODE_ENV || "development"}`);
+    console.log(`  Drive Sync: ${process.env.GOOGLE_DRIVE_FOLDER_ID ? "ENABLED" : "DISABLED (set GOOGLE_DRIVE_FOLDER_ID)"}`);
+    console.log(`========================================\n`);
   });
 }
 
