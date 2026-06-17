@@ -9,11 +9,12 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 import OpenAI from "openai";
 import { Solution, Collateral, UserLog, CurrentProject, UpcomingProject, SubdomainPortal } from "../shared/types";
+
+// ESM does not expose __dirname — derive it from import.meta.url
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import {
   syncDataStoreToDrive,
   appendLogToDrive,
