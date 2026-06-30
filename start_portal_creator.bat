@@ -6,11 +6,11 @@ setlocal enabledelayedexpansion
 ::  Starts the app on port 4567 with full debug output
 :: ============================================================
 
-title Mobius Portal Creator
+title SPC — Solutions Portal ^& Collaterals
 
 echo.
 echo  =====================================================
-echo   MOBIUS PORTAL CREATOR — STARTUP
+echo   SPC — Solutions Portal ^& Collaterals
 echo  =====================================================
 echo.
 
@@ -108,10 +108,9 @@ echo.
 
 set PORT=%APP_PORT%
 set NODE_ENV=development
-set DEBUG=*
 
-:: Run with tsx for full TypeScript + debug output
-npx tsx --env-file=.env server.ts
+:: Run the backend entry point (dotenv loaded inside server.ts)
+npx tsx backend/server.ts
 
 :: ------------------------------------------------------------
 :: Exit handling
