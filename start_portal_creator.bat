@@ -84,21 +84,34 @@ if not exist "node_modules" (
 )
 
 :: ------------------------------------------------------------
-:: Port check
+:: Port check — kill port 4567 (app) and 24678 (Vite HMR)
 :: ------------------------------------------------------------
 set APP_PORT=4567
+set HMR_PORT=24678
+
+for %%P in (%APP_PORT% %HMR_PORT%) do (
+    netstat -ano | findstr ":%%P " | findstr "LISTENING" >nul 2>&1
+    if not errorlevel 1 (
+        call :LOG "[WARN]  Port %%P is in use — freeing it..."
+        for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%%P " ^| findstr "LISTENING"') do (
+            call :LOG "[INFO]  Killing PID %%p on port %%P..."
+            taskkill /PID %%p /F >nul 2>&1
+        )
+    ) else (
+        call :LOG "[OK]    Port %%P is free."
+    )
+)
+
+:: Wait 2 s to let the OS release the ports
+timeout /t 2 /nobreak >nul
+
+:: Verify port 4567 is actually free before launching
 netstat -ano | findstr ":%APP_PORT% " | findstr "LISTENING" >nul 2>&1
 if not errorlevel 1 (
-    call :LOG "[WARN]  Port %APP_PORT% is already in use."
-    call :LOG "[WARN]  Attempting to free it..."
-    for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%APP_PORT% " ^| findstr "LISTENING"') do (
-        call :LOG "[INFO]  Killing PID %%p on port %APP_PORT%..."
-        taskkill /PID %%p /F >nul 2>&1
-    )
-    timeout /t 1 /nobreak >nul
-) else (
-    call :LOG "[OK]    Port %APP_PORT% is free."
+    call :LOG "[ERROR] Port %APP_PORT% still in use after kill. Try running as Administrator."
+    goto :FAIL
 )
+call :LOG "[OK]    Port %APP_PORT% confirmed free."
 
 :: ------------------------------------------------------------
 :: Launch — pipe through PowerShell Tee so output goes to

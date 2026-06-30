@@ -903,13 +903,23 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`\n========================================`);
     console.log(`  SPC — Solutions Portal & Collaterals`);
     console.log(`  Running on: http://localhost:${PORT}`);
     console.log(`  Mode: ${process.env.NODE_ENV || "development"}`);
     console.log(`  Drive Sync: ${process.env.GOOGLE_DRIVE_FOLDER_ID ? "ENABLED" : "DISABLED (set GOOGLE_DRIVE_FOLDER_ID)"}`);
     console.log(`========================================\n`);
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`\n[ERROR] Port ${PORT} is already in use.`);
+      console.error(`[ERROR] Close the other process using port ${PORT} and try again.`);
+      console.error(`[ERROR] On Windows: netstat -ano | findstr :${PORT}  then  taskkill /PID <pid> /F\n`);
+      process.exit(1);
+    }
+    throw err;
   });
 }
 
