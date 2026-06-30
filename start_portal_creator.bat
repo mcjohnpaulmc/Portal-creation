@@ -2,120 +2,151 @@
 setlocal enabledelayedexpansion
 
 :: ============================================================
-::  Mobius Portal Creator — Launcher
-::  Starts the app on port 4567 with full debug output
+::  SPC — Solutions Portal & Collaterals
+::  Launcher — opens a persistent window so errors are visible
 :: ============================================================
+
+:: If we were double-clicked (no parent cmd), relaunch inside a
+:: persistent cmd /k window so the output is never lost.
+if "%_SPC_RELAUNCHED%"=="" (
+    set _SPC_RELAUNCHED=1
+    start "SPC — Solutions Portal & Collaterals" cmd /k ""%~f0""
+    exit /b
+)
 
 title SPC — Solutions Portal ^& Collaterals
 
-echo.
-echo  =====================================================
-echo   SPC — Solutions Portal ^& Collaterals
-echo  =====================================================
-echo.
+set LOGFILE=%~dp0spc-startup.log
+echo. > "%LOGFILE%"
+
+call :log "====================================================="
+call :log "  SPC — Solutions Portal ^& Collaterals"
+call :log "  %DATE% %TIME%"
+call :log "====================================================="
+call :log ""
 
 :: ------------------------------------------------------------
-:: Step 1: Verify Node.js is installed
+:: Step 1: Node.js
 :: ------------------------------------------------------------
-echo [CHECK] Verifying Node.js installation...
+call :log "[CHECK] Verifying Node.js..."
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Node.js not found. Please install Node.js from https://nodejs.org
-    pause
-    exit /b 1
+    call :log "[ERROR] Node.js not found. Install from https://nodejs.org"
+    goto :die
 )
 for /f "tokens=*" %%v in ('node --version') do set NODE_VER=%%v
-echo [OK]    Node.js found: %NODE_VER%
+call :log "[OK]    Node.js %NODE_VER%"
 
 :: ------------------------------------------------------------
-:: Step 2: Verify npm is installed
+:: Step 2: npm
 :: ------------------------------------------------------------
-echo [CHECK] Verifying npm installation...
 where npm >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] npm not found. Please reinstall Node.js.
-    pause
-    exit /b 1
+    call :log "[ERROR] npm not found. Reinstall Node.js."
+    goto :die
 )
 for /f "tokens=*" %%v in ('npm --version') do set NPM_VER=%%v
-echo [OK]    npm found: v%NPM_VER%
+call :log "[OK]    npm v%NPM_VER%"
 
 :: ------------------------------------------------------------
-:: Step 3: Navigate to project directory
+:: Step 3: Working directory
 :: ------------------------------------------------------------
-echo [INFO]  Changing to project directory...
 cd /d "%~dp0"
-echo [OK]    Working directory: %CD%
+call :log "[OK]    Directory: %CD%"
 
 :: ------------------------------------------------------------
-:: Step 4: Check .env file exists
+:: Step 4: .env
 :: ------------------------------------------------------------
-echo [CHECK] Looking for .env file...
 if not exist ".env" (
-    echo [WARN]  .env not found. Copying from .env.example...
     if exist ".env.example" (
         copy ".env.example" ".env" >nul
-        echo [OK]    .env created from .env.example. Please fill in your API keys.
+        call :log "[WARN]  .env missing — copied from .env.example. Fill in API keys."
     ) else (
-        echo [WARN]  .env.example also missing. Continuing without .env — some features may be disabled.
+        call :log "[WARN]  No .env found. Some features disabled."
     )
 ) else (
-    echo [OK]    .env file found.
+    call :log "[OK]    .env found."
 )
 
 :: ------------------------------------------------------------
-:: Step 5: Check node_modules exist
+:: Step 5: Dependencies
 :: ------------------------------------------------------------
-echo [CHECK] Checking node_modules...
 if not exist "node_modules" (
-    echo [INFO]  node_modules not found. Running npm install...
-    echo [INFO]  This may take a minute on first run...
+    call :log "[INFO]  Running npm install (first-time setup)..."
     npm install
     if errorlevel 1 (
-        echo [ERROR] npm install failed. Check your internet connection or package.json.
-        pause
-        exit /b 1
+        call :log "[ERROR] npm install failed. Check internet / package.json."
+        goto :die
     )
-    echo [OK]    Dependencies installed successfully.
+    call :log "[OK]    Dependencies installed."
 ) else (
-    echo [OK]    node_modules present.
+    call :log "[OK]    node_modules present."
 )
 
 :: ------------------------------------------------------------
-:: Step 6: Confirm port
+:: Step 6: Port check
 :: ------------------------------------------------------------
 set APP_PORT=4567
-echo [INFO]  Target port: %APP_PORT%
-
-:: Check if port is already in use
-echo [CHECK] Checking if port %APP_PORT% is free...
 netstat -ano | findstr ":%APP_PORT% " | findstr "LISTENING" >nul 2>&1
 if not errorlevel 1 (
-    echo [WARN]  Port %APP_PORT% is already in use. Another process may be running.
-    echo [WARN]  The app will attempt to start anyway — you may see an EADDRINUSE error.
+    call :log "[WARN]  Port %APP_PORT% already in use — may see EADDRINUSE."
+) else (
+    call :log "[OK]    Port %APP_PORT% is free."
 )
 
 :: ------------------------------------------------------------
-:: Step 7: Set environment and launch
+:: Step 7: Launch
 :: ------------------------------------------------------------
-echo.
-echo  =====================================================
-echo   LAUNCHING SERVER
-echo   URL: http://localhost:%APP_PORT%
-echo   Press Ctrl+C to stop
-echo  =====================================================
-echo.
+call :log ""
+call :log "====================================================="
+call :log "  LAUNCHING  http://localhost:%APP_PORT%"
+call :log "  Press Ctrl+C to stop"
+call :log "====================================================="
+call :log ""
+call :log "[INFO]  Log saved to: %LOGFILE%"
+call :log ""
 
 set PORT=%APP_PORT%
 set NODE_ENV=development
 
-:: Run the backend entry point (dotenv loaded inside server.ts)
 npx tsx backend/server.ts
+set EXIT_CODE=%errorlevel%
 
 :: ------------------------------------------------------------
-:: Exit handling
+:: Server exited — keep window open to show the error
+:: ------------------------------------------------------------
+call :log ""
+call :log "[INFO]  Server stopped (exit code %EXIT_CODE%)."
+call :log "[INFO]  Full log: %LOGFILE%"
+echo.
+echo  =====================================================
+echo   Server has stopped (exit code %EXIT_CODE%).
+echo   Scroll up to read the error, or open:
+echo   %LOGFILE%
+echo  =====================================================
+echo.
+echo  Press any key to close this window...
+pause >nul
+endlocal
+exit /b %EXIT_CODE%
+
+:: ------------------------------------------------------------
+:die
 :: ------------------------------------------------------------
 echo.
-echo [INFO]  Server process exited.
-pause
+echo  =====================================================
+echo   STARTUP FAILED — see error above or:
+echo   %LOGFILE%
+echo  =====================================================
+echo.
+echo  Press any key to close this window...
+pause >nul
 endlocal
+exit /b 1
+
+:: ------------------------------------------------------------
+:log
+:: ------------------------------------------------------------
+echo %~1
+echo %~1 >> "%LOGFILE%"
+exit /b
