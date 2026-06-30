@@ -2,12 +2,11 @@
 setlocal enabledelayedexpansion
 
 :: ============================================================
-::  SPC — Solutions Portal & Collaterals
-::  Launcher — opens a persistent window so errors are visible
+::  SPC — Solutions Portal & Collaterals  |  Launcher
 :: ============================================================
 
-:: If we were double-clicked (no parent cmd), relaunch inside a
-:: persistent cmd /k window so the output is never lost.
+:: Relaunch inside a persistent cmd /k window when double-clicked,
+:: so the output is never lost on exit or crash.
 if "%_SPC_RELAUNCHED%"=="" (
     set _SPC_RELAUNCHED=1
     start "SPC — Solutions Portal & Collaterals" cmd /k ""%~f0""
@@ -15,138 +14,151 @@ if "%_SPC_RELAUNCHED%"=="" (
 )
 
 title SPC — Solutions Portal ^& Collaterals
+set "LOGFILE=%~dp0spc-startup.log"
 
-set LOGFILE=%~dp0spc-startup.log
-echo. > "%LOGFILE%"
+:: Create / clear the log file
+type nul > "%LOGFILE%"
 
-call :log "====================================================="
-call :log "  SPC — Solutions Portal ^& Collaterals"
-call :log "  %DATE% %TIME%"
-call :log "====================================================="
-call :log ""
+call :LOG "====================================================="
+call :LOG "  SPC - Solutions Portal and Collaterals"
+call :LOG "  Started: %DATE% %TIME%"
+call :LOG "====================================================="
+call :BLANK
 
 :: ------------------------------------------------------------
-:: Step 1: Node.js
+:: Node.js
 :: ------------------------------------------------------------
-call :log "[CHECK] Verifying Node.js..."
+call :LOG "[CHECK] Verifying Node.js..."
 where node >nul 2>&1
 if errorlevel 1 (
-    call :log "[ERROR] Node.js not found. Install from https://nodejs.org"
-    goto :die
+    call :LOG "[ERROR] Node.js not found. Install from https://nodejs.org"
+    goto :FAIL
 )
 for /f "tokens=*" %%v in ('node --version') do set NODE_VER=%%v
-call :log "[OK]    Node.js %NODE_VER%"
+call :LOG "[OK]    Node.js !NODE_VER!"
 
 :: ------------------------------------------------------------
-:: Step 2: npm
+:: npm
 :: ------------------------------------------------------------
 where npm >nul 2>&1
 if errorlevel 1 (
-    call :log "[ERROR] npm not found. Reinstall Node.js."
-    goto :die
+    call :LOG "[ERROR] npm not found. Reinstall Node.js."
+    goto :FAIL
 )
 for /f "tokens=*" %%v in ('npm --version') do set NPM_VER=%%v
-call :log "[OK]    npm v%NPM_VER%"
+call :LOG "[OK]    npm v!NPM_VER!"
 
 :: ------------------------------------------------------------
-:: Step 3: Working directory
+:: Working directory
 :: ------------------------------------------------------------
 cd /d "%~dp0"
-call :log "[OK]    Directory: %CD%"
+call :LOG "[OK]    Directory: %CD%"
 
 :: ------------------------------------------------------------
-:: Step 4: .env
+:: .env file
 :: ------------------------------------------------------------
 if not exist ".env" (
     if exist ".env.example" (
         copy ".env.example" ".env" >nul
-        call :log "[WARN]  .env missing — copied from .env.example. Fill in API keys."
+        call :LOG "[WARN]  .env missing — copied from .env.example. Fill in API keys."
     ) else (
-        call :log "[WARN]  No .env found. Some features disabled."
+        call :LOG "[WARN]  No .env or .env.example found. Some features disabled."
     )
 ) else (
-    call :log "[OK]    .env found."
+    call :LOG "[OK]    .env found."
 )
 
 :: ------------------------------------------------------------
-:: Step 5: Dependencies
+:: node_modules
 :: ------------------------------------------------------------
 if not exist "node_modules" (
-    call :log "[INFO]  Running npm install (first-time setup)..."
-    npm install
+    call :LOG "[INFO]  Running npm install (first-time setup)..."
+    npm install >> "%LOGFILE%" 2>&1
     if errorlevel 1 (
-        call :log "[ERROR] npm install failed. Check internet / package.json."
-        goto :die
+        call :LOG "[ERROR] npm install failed. Check internet connection."
+        goto :FAIL
     )
-    call :log "[OK]    Dependencies installed."
+    call :LOG "[OK]    Dependencies installed."
 ) else (
-    call :log "[OK]    node_modules present."
+    call :LOG "[OK]    node_modules present."
 )
 
 :: ------------------------------------------------------------
-:: Step 6: Port check
+:: Port check
 :: ------------------------------------------------------------
 set APP_PORT=4567
 netstat -ano | findstr ":%APP_PORT% " | findstr "LISTENING" >nul 2>&1
 if not errorlevel 1 (
-    call :log "[WARN]  Port %APP_PORT% already in use — may see EADDRINUSE."
+    call :LOG "[WARN]  Port %APP_PORT% is already in use."
+    call :LOG "[WARN]  Attempting to free it..."
+    for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%APP_PORT% " ^| findstr "LISTENING"') do (
+        call :LOG "[INFO]  Killing PID %%p on port %APP_PORT%..."
+        taskkill /PID %%p /F >nul 2>&1
+    )
+    timeout /t 1 /nobreak >nul
 ) else (
-    call :log "[OK]    Port %APP_PORT% is free."
+    call :LOG "[OK]    Port %APP_PORT% is free."
 )
 
 :: ------------------------------------------------------------
-:: Step 7: Launch
+:: Launch — pipe through PowerShell Tee so output goes to
+::           BOTH the screen and the log file simultaneously
 :: ------------------------------------------------------------
-call :log ""
-call :log "====================================================="
-call :log "  LAUNCHING  http://localhost:%APP_PORT%"
-call :log "  Press Ctrl+C to stop"
-call :log "====================================================="
-call :log ""
-call :log "[INFO]  Log saved to: %LOGFILE%"
-call :log ""
+call :BLANK
+call :LOG "====================================================="
+call :LOG "  LAUNCHING  http://localhost:%APP_PORT%"
+call :LOG "  Ctrl+C to stop the server"
+call :LOG "  Log file: %LOGFILE%"
+call :LOG "====================================================="
+call :BLANK
 
 set PORT=%APP_PORT%
 set NODE_ENV=development
 
-npx tsx backend/server.ts
-set EXIT_CODE=%errorlevel%
+npx tsx backend/server.ts 2>&1 | powershell -NoProfile -Command "$input | Tee-Object -FilePath '%LOGFILE%' -Append"
+
+:: Capture exit code from the tsx side of the pipe via ERRORLEVEL trick
+set TSX_EXIT=!ERRORLEVEL!
 
 :: ------------------------------------------------------------
-:: Server exited — keep window open to show the error
+:: Server stopped — window stays open (cmd /k keeps it alive)
 :: ------------------------------------------------------------
-call :log ""
-call :log "[INFO]  Server stopped (exit code %EXIT_CODE%)."
-call :log "[INFO]  Full log: %LOGFILE%"
+call :BLANK
+call :LOG "[INFO]  Server stopped  (exit code: !TSX_EXIT!)"
+call :LOG "[INFO]  Review full log: %LOGFILE%"
 echo.
 echo  =====================================================
-echo   Server has stopped (exit code %EXIT_CODE%).
-echo   Scroll up to read the error, or open:
+echo   Server has stopped (exit code: !TSX_EXIT!)
+echo   Scroll up to read the output, or open:
 echo   %LOGFILE%
 echo  =====================================================
 echo.
-echo  Press any key to close this window...
-pause >nul
-endlocal
-exit /b %EXIT_CODE%
+echo  This window will stay open. Press Ctrl+C or close it when done.
+goto :EOF
 
 :: ------------------------------------------------------------
-:die
-:: ------------------------------------------------------------
+:FAIL
 echo.
 echo  =====================================================
-echo   STARTUP FAILED — see error above or:
+echo   STARTUP FAILED — see error above or open:
 echo   %LOGFILE%
 echo  =====================================================
 echo.
-echo  Press any key to close this window...
-pause >nul
-endlocal
-exit /b 1
+echo  This window will stay open. Press Ctrl+C or close it when done.
+goto :EOF
 
 :: ------------------------------------------------------------
-:log
+:: :LOG  — echo to screen and append to log file
 :: ------------------------------------------------------------
+:LOG
 echo %~1
 echo %~1 >> "%LOGFILE%"
+exit /b
+
+:: ------------------------------------------------------------
+:: :BLANK — print blank line to screen and log without "ECHO is off."
+:: ------------------------------------------------------------
+:BLANK
+echo(
+echo( >> "%LOGFILE%"
 exit /b
